@@ -1,0 +1,126 @@
+#!/usr/bin/php
+<?php
+    $arrFromDB = [
+        "10.10.0.1:3306"  => [
+            "db1" => ["root", "password"],
+            "db2" => ["root", "password"],
+            "db3" => ["root", "password"],
+        ],
+        "10.10.0.2:3306"  => [
+            "db4" => ["root", "password"],
+            "db5" => ["root", "password"],
+            "db6" => ["root", "password"],
+        ]
+    ];
+    $arrToDB = [
+        "10.10.0.3:3306" => ["root", "password"],
+        "10.10.0.4:3306" => ["root", "password"],
+    ];
+
+    $syncdb = $argv[1];
+    $synchost = "";
+    $dblist = [];
+   
+    foreach ($arrFromDB as $host => $db)
+    {
+        if (isset($db[$syncdb]))
+        {
+            $synchost = $host;
+            break;
+        }
+        $dblist = array_merge($dblist, array_keys($db));
+    } 
+    if (!$synchost)
+    {
+        echo "Please input valid dbname.\n";
+        echo "Usage: syncdb <dbname>\n";
+        echo "e.g.\n";
+        foreach ($dblist as $db)
+        {
+        	echo "       syncdb $db\n";
+        }
+        exit();
+    }
+
+    $mysqli = new mysqli($synchost, $arrFromDB[$synchost][0], $arrFromDB[$synchost][1], $syncdb);
+
+    $sql = "show tables";
+    $result = $mysqli->query($sql);
+
+    $arrTable1 = [];
+    $arrTableSql = [];
+    while ($row = $result->fetch_assoc()) {
+        $table = $row['Tables_in_' . $syncdb];
+
+        $sql = 'show create table `' . $table . '`';
+        $res = $mysqli->query($sql);
+        while ($tb = $res->fetch_assoc()) {
+            $tbsql = $tb['Create Table'];
+            $tbsql = preg_replace("/AUTO_INCREMENT=(\d+)/", "", $tbsql);
+            $arrTableSql[$table] = $tbsql . ";";
+        }
+
+        $sql = 'desc `' . $table . '`';
+        $res = $mysqli->query($sql);
+        while ($tb = $res->fetch_assoc()) {
+            $arrTable1[$table][] = $tb['Field'];
+        }
+    }
+    $mysqli->close();
+
+    //同步
+    foreach ($arrToDB as $host => $auth)
+    {
+        $mysqli = new mysqli($host, $auth[0], $auth[1], $syncdb);
+
+        $sql = "show tables";
+        $result = $mysqli->query($sql);
+
+        $arrTable2 = [];
+        while ($row = $result->fetch_assoc()) {
+            $table = $row['Tables_in_' . $syncdb];
+            $sql = 'desc `' . $table . '`';
+            $res = $mysqli->query($sql);
+            while ($tb = $res->fetch_assoc()) {
+                $arrTable2[$table][] = $tb['Field'];
+            }
+        }
+
+        foreach ($arrTable1 as $k => $v)
+        {
+            //创建新表
+            if (!isset($arrTable2[$k]))
+            {
+                $mysqli->query($arrTableSql[$k]);
+                echo $arrTableSql[$k] . "\n";
+            }
+            //修改表结构
+            elseif (count($arrTable2[$k]) !== count($v))
+            {
+                $arrDiff = array_diff($v, $arrTable2[$k]);
+                if ($arrDiff)
+                {
+                    $arrSql = explode("\n", $arrTableSql[$k]);
+                    foreach ($arrDiff as $f)
+                    {
+                        foreach ($arrSql as $fv)
+                        {
+                            if (strpos($fv, "`$f`"))
+                            {
+                                foreach ($v as $kk => $fi)
+                                {
+                                    if ($fi == $f)
+                                    {
+                                        $alterSql = "ALTER TABLE $k ADD" . substr($fv, 0, -1) . " AFTER `" . $v[$kk-1] . "`\n";
+                                        echo $alterSql;
+                                        $mysqli->query($alterSql);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        $mysqli->close();
+    }
